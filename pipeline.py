@@ -67,6 +67,7 @@ def transcribe_audios(
     import whisper
     import torch
     import json
+    from math import floor
 
     print("Starting")
     with open(video_titles.path, "r") as f:
@@ -92,7 +93,7 @@ def transcribe_audios(
             # merge segments data and videos_meta data
             meta = {
                 "title": video_titles_dict[id[:-4]],
-                "url": f"https://youtu.be/{id}",
+                "url": f"https://youtu.be/{audio_file.stem}?t={floor(segment['start'])}",
                 **{
                     "id": f"{id}-t{segments[j]['start']}",
                     "text": segment["text"].strip(),
@@ -143,7 +144,6 @@ def create_and_push_embeddings(
     batch_size: int,
 ):
     import json
-    from pathlib import Path
     from tqdm import tqdm
     from sentence_transformers import SentenceTransformer
     import pinecone
