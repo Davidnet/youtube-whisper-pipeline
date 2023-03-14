@@ -3,6 +3,53 @@ from kfp import dsl, compiler
 from kfp.dsl import Input, Output, Artifact
 
 
+@dsl.component(packages_to_install=["openai"])
+def transcribe_audios_api(
+    audio_files: Input[Artifact],
+    video_titles: Input[Artifact],
+    transcriptions: Output[Artifact],
+):
+    from pathlib import Path
+    import json
+    import openai
+
+    openai.api_key = "sk-"
+    with open(video_titles.path, "r") as f:
+        video_titles_dict = json.load(f)
+
+    # Define the threshold size in bytes (22 MB = 22 * 1024 * 1024 bytes)
+    threshold_size = 22 * 1024 * 1024
+
+    # List of Path objects
+    path_list = list(Path("/tmp/audios").glob("*.mp3"))
+    print(f"Found {len(path_list)} objects")
+    # Filter paths with files larger than 22 MB
+    filtered_paths = [
+        path for path in path_list if path.stat().st_size < threshold_size
+    ]
+    filtered_paths.sort(key=lambda x: x.stat().st_size)
+    print(f"Using {len(filtered_paths)} objects")
+    data = []
+    for filtered_path in filtered_paths:
+        id = filtered_path.name
+        with open(filtered_path, "rb") as file_rb:
+            trancription = openai.Audio.transcribe("whisper-1", file_rb)
+        text_transcription = trancription["text"]
+        meta = {
+            "title": video_titles_dict[id[:-4]],
+            "url": f"https://youtu.be/{filtered_path.stem}",
+            **{
+                "id": f"{id}",
+                "text": text_transcription.strip(),
+            },
+        }
+        data.append(meta)
+    with open(transcriptions.path, "w", encoding="utf-8") as fp:
+        for line in data:
+            json.dump(line, fp)
+            fp.write("\n")
+
+
 @dsl.component(packages_to_install=["pytube==12.1.2"])
 def download_videos(
     videos_ids: Input[Artifact],
@@ -182,7 +229,7 @@ def create_and_push_embeddings(
     print(model)
     dim = model.get_sentence_embedding_dimension()
     pinecone.init(
-        api_key="NO-IDEA-HOW-TO-SAFEGUARD",  # app.pinecone.io
+        api_key="to-delete",  # app.pinecone.io
         environment="us-east1-gcp",  # find next to API key
     )
 
@@ -228,6 +275,7 @@ def pipeline(
     window: int = 6,
     stride: int = 3,
     batch_size: int = 64,
+    offline: bool = False,
 ):
     importer_task = dsl.importer(
         artifact_uri=video_location,
@@ -236,25 +284,32 @@ def pipeline(
     )
     reader_task = download_and_parse(urls=importer_task.output)
     download_task = download_videos(videos_ids=reader_task.output)
-    # TODO (davidnet): How to ask for an accelerator?
-    transcribe_task = transcribe_audios(
-        audio_files=download_task.outputs["audio_files"],
-        whisper_model=whisper_model,
-        video_titles=download_task.outputs["video_titles"],
-    )
-    transcribe_task.set_cpu_limit("2").set_memory_limit(
-        "8G"
-    ).add_node_selector_constraint("NVIDIA_TESLA_T4").set_gpu_limit("1")
-    embedding_task = create_and_push_embeddings(
-        transcriptions=transcribe_task.output,
-        index_id=index_id,
-        window=window,
-        stride=stride,
-        batch_size=batch_size,
-    )
-    embedding_task.set_cpu_limit("2").set_memory_limit(
-        "8G"
-    ).add_node_selector_constraint("NVIDIA_TESLA_T4").set_gpu_limit("1")
+    with dsl.Condition(offline == False):
+        transcribe_task = transcribe_audios(
+            audio_files=download_task.outputs["audio_files"],
+            whisper_model=whisper_model,
+            video_titles=download_task.outputs["video_titles"],
+        )
+        transcribe_task.set_cpu_limit("2").set_memory_limit(
+            "8G"
+        ).add_node_selector_constraint("NVIDIA_TESLA_T4").set_gpu_limit("1")
+        embedding_task = create_and_push_embeddings(
+            transcriptions=transcribe_task.output,
+            index_id=index_id,
+            window=window,
+            stride=stride,
+            batch_size=batch_size,
+        )
+        embedding_task.set_cpu_limit("2").set_memory_limit(
+            "8G"
+        ).add_node_selector_constraint("NVIDIA_TESLA_T4").set_gpu_limit("1")
+
+    with dsl.Condition(offline == True):
+        transcribe_offline_task = transcribe_audios_api(
+            audio_files=download_task.outputs["audio_files"],
+            whisper_model=whisper_model,
+            video_titles=download_task.outputs["video_titles"],
+        )
 
 
 if __name__ == "__main__":
